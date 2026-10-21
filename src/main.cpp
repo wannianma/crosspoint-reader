@@ -340,7 +340,13 @@ void setup() {
   // and the host has to be physically replugged for logs to flow. Warm reboot
   // worked without the delay because USB was already enumerated.
   delay(250);
+#endif
+  // USB CDC, 115200 8N1. Baud is advisory on CDC (no parity/stop bits to set);
+  // the PC companion must open the port at 115200. Page-turn bytes share this
+  // port with logs. begin() runs even when logging is compiled out so 'n'/'p'
+  // still work on slim builds.
   Serial.begin(115200);
+#ifdef ENABLE_SERIAL_LOG
   logSerial.setTxTimeoutMs(1);  // This is a load-bearing 1. Do not modify.
 #endif
 
@@ -508,12 +514,59 @@ void setup() {
   allowSleepAt = millis() + 2000;
 }
 
+// USB CDC page-turn. Companion sends raw bytes at 115200 8N1:
+//   'n'/'N' next page, 'p'/'P' previous page. A trailing CR/LF is ignored.
+// Repeats inside the debounce window are drained and dropped so a burst
+// cannot queue extra turns while the panel is busy refreshing.
+static constexpr unsigned long USB_PAGE_TURN_DEBOUNCE_MS = 250;
+
+// Side-button index MappedInputManager uses for PageForward / PageBack.
+// Same table as kSideLayouts in src/MappedInputManager.cpp.
+static uint8_t usbPageTurnButton(bool forward) {
+  const bool swapped = SETTINGS.sideButtonLayout == CrossPointSettings::SIDE_BUTTON_LAYOUT::NEXT_PREV;
+  if (forward) return swapped ? HalGPIO::BTN_UP : HalGPIO::BTN_DOWN;
+  return swapped ? HalGPIO::BTN_DOWN : HalGPIO::BTN_UP;
+}
+
+static void pollUsbSerialPageTurn() {
+  static unsigned long lastInjectMs = 0;
+  static bool haveInjected = false;
+  bool injected = false;
+
+  // Bound the drain so a flooded CDC RX buffer cannot stall the UI loop.
+  for (int budget = 64; budget > 0 && logSerial.available() > 0; --budget) {
+    const int raw = logSerial.peek();
+    if (raw < 0) break;
+    const char c = static_cast<char>(raw);
+    const bool next = (c == 'n' || c == 'N');
+    const bool prev = (c == 'p' || c == 'P');
+    if (!next && !prev && c != '\r' && c != '\n') {
+      break;  // Leave CMD: lines for the screenshot parser below.
+    }
+
+    logSerial.read();
+    if ((!next && !prev) || injected) continue;
+
+    const unsigned long now = millis();
+    if (haveInjected && (now - lastInjectMs) < USB_PAGE_TURN_DEBOUNCE_MS) continue;
+    haveInjected = true;
+    lastInjectMs = now;
+    // Same inject path a Bluetooth HID page-turner would use.
+    gpio.injectButtonPress(usbPageTurnButton(next));
+    injected = true;
+    LOG_DBG("USB", "Page turn %s", next ? "next" : "prev");
+  }
+}
+
 void loop() {
   static unsigned long maxLoopDuration = 0;
   const unsigned long loopStartTime = millis();
   static unsigned long lastMemPrint = 0;
 
   gpio.update();
+  // After update() so this loop's synthetic edges are not cleared until the
+  // next iteration. activityManager.loop() below sees them as button edges.
+  pollUsbSerialPageTurn();
   halTiltSensor.update(SETTINGS.tiltPageTurn, SETTINGS.orientation, activityManager.isReaderActivity());
 
   renderer.setFadingFix(SETTINGS.fadingFix);
