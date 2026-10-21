@@ -203,6 +203,9 @@ void HalGPIO::begin() {
 }
 
 void HalGPIO::update() {
+  // Drop last loop's synthetic edges before sampling the real buttons.
+  injectedPressed = 0;
+  injectedReleased = 0;
   inputMgr.update();
   const bool connected = isUsbConnected();
   usbStateChanged = (connected != lastUsbConnected);
@@ -211,17 +214,52 @@ void HalGPIO::update() {
 
 bool HalGPIO::wasUsbStateChanged() const { return usbStateChanged; }
 
+namespace {
+bool injectedBit(uint8_t mask, uint8_t buttonIndex) {
+  return buttonIndex <= HalGPIO::BTN_POWER && (mask & (1u << buttonIndex)) != 0;
+}
+
+bool anyPhysicalButtonDown(const InputManager& inputMgr) {
+  for (uint8_t i = 0; i <= HalGPIO::BTN_POWER; ++i) {
+    if (inputMgr.isPressed(i)) return true;
+  }
+  return false;
+}
+}  // namespace
+
 bool HalGPIO::isPressed(uint8_t buttonIndex) const { return inputMgr.isPressed(buttonIndex); }
 
-bool HalGPIO::wasPressed(uint8_t buttonIndex) const { return inputMgr.wasPressed(buttonIndex); }
+bool HalGPIO::wasPressed(uint8_t buttonIndex) const {
+  return injectedBit(injectedPressed, buttonIndex) || inputMgr.wasPressed(buttonIndex);
+}
 
-bool HalGPIO::wasAnyPressed() const { return inputMgr.wasAnyPressed(); }
+bool HalGPIO::wasAnyPressed() const { return injectedPressed != 0 || inputMgr.wasAnyPressed(); }
 
-bool HalGPIO::wasReleased(uint8_t buttonIndex) const { return inputMgr.wasReleased(buttonIndex); }
+bool HalGPIO::wasReleased(uint8_t buttonIndex) const {
+  return injectedBit(injectedReleased, buttonIndex) || inputMgr.wasReleased(buttonIndex);
+}
 
-bool HalGPIO::wasAnyReleased() const { return inputMgr.wasAnyReleased(); }
+bool HalGPIO::wasAnyReleased() const { return injectedReleased != 0 || inputMgr.wasAnyReleased(); }
 
-unsigned long HalGPIO::getHeldTime() const { return inputMgr.getHeldTime(); }
+unsigned long HalGPIO::getHeldTime() const {
+  // A serial/HID click is not a held button. Reporting the stale physical
+  // hold here would make the reader treat the click as a long-press
+  // (chapter skip / orientation change).
+  if ((injectedPressed | injectedReleased) != 0 && !anyPhysicalButtonDown(inputMgr)) {
+    return 1;
+  }
+  return inputMgr.getHeldTime();
+}
+
+void HalGPIO::injectButtonPress(uint8_t buttonIndex) {
+  if (buttonIndex > BTN_POWER) return;
+  const uint8_t bit = static_cast<uint8_t>(1u << buttonIndex);
+  // Press edge: default reader page-turn and menu navigation (wasPressed).
+  // Release edge: page-turn when long-press behavior is enabled, and UIs that
+  // act on wasReleased. isPressed() stays false, so this is a short click.
+  injectedPressed |= bit;
+  injectedReleased |= bit;
+}
 
 unsigned long HalGPIO::getPowerButtonHeldTime() const { return inputMgr.getPowerButtonHeldTime(); }
 

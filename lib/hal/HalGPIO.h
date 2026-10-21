@@ -51,6 +51,11 @@ class HalGPIO {
 
  private:
   DeviceType _deviceType = DeviceType::X4;
+  // One-shot synthetic edges from injectButtonPress(). Cleared at the start of
+  // update() so a command is visible for exactly one loop, same as a physical
+  // debounced edge. Bits are HalGPIO::BTN_* indexes.
+  uint8_t injectedPressed = 0;
+  uint8_t injectedReleased = 0;
 
  public:
   HalGPIO() = default;
@@ -71,6 +76,12 @@ class HalGPIO {
   bool wasAnyReleased() const;
   unsigned long getHeldTime() const;
   unsigned long getPowerButtonHeldTime() const;
+
+  // Synthetic short click on a logical button (press edge + release edge).
+  // USB serial page-turn and any future Bluetooth HID page-turner should call
+  // this instead of poking InputManager. Does not report isPressed(), and the
+  // synthetic hold time is 1 ms so long-press actions do not fire.
+  void injectButtonPress(uint8_t buttonIndex);
 
   // Setup wake up GPIO and enter deep sleep
   void startDeepSleep();
